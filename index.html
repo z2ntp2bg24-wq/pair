@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+  <meta name="theme-color" content="#000000" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <meta name="apple-mobile-web-app-title" content="Pair" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png" />
+  <title>Pair</title>
+  <link rel="stylesheet" href="styles.css?v=29" />
+</head>
+<body class="no-nav">
+  <header class="topbar">
+    <button type="button" id="hdr-back" class="hdr-back" hidden aria-label="返回考试列表">← 考试</button>
+    <div class="header-main">
+      <div id="hdr-deck" class="hdr-deck">Pair</div>
+    </div>
+    <div id="online-badge" class="badge" title="网络状态" hidden>离线</div>
+  </header>
+
+  <main id="app" class="app" aria-live="polite"></main>
+
+  <nav class="bottom-nav" aria-label="主导航" style="display:none">
+    <button type="button" data-nav="today" class="nav-btn active">首页</button>
+    <button type="button" data-nav="wrong" class="nav-btn">错题</button>
+    <button type="button" data-nav="more" class="nav-btn">更多</button>
+  </nav>
+
+  <!-- Safety net: plain ES5, no dependencies. If the app cannot start, show a recovery screen instead of a blank page.
+       Nothing here ever deletes IndexedDB / localStorage (your progress). -->
+  <script>
+  (function () {
+    var BUILD = "v29";
+    window.__PAIR_BUILD = BUILD;
+    var lastErr = "";
+    var overlay = null;
+    var timer = null;
+
+    function appRendered() {
+      var a = document.getElementById("app");
+      return !!(a && a.children.length > 0);
+    }
+    function esc(s) {
+      return String(s).replace(/[&<>"]/g, function (c) {
+        return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+      });
+    }
+    function msgOf(e) {
+      if (!e) return "未知错误";
+      if (typeof e === "string") return e;
+      return (e.name ? e.name + ": " : "") + (e.message || String(e));
+    }
+
+    // Drop service workers + code caches only. Data lives in IndexedDB / localStorage and is NOT touched.
+    window.__pairClearCodeCaches = function () {
+      var jobs = [];
+      try {
+        if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+          jobs.push(
+            navigator.serviceWorker.getRegistrations().then(function (rs) {
+              return Promise.all(rs.map(function (r) { return r.unregister(); }));
+            })
+          );
+        }
+      } catch (e) {}
+      try {
+        if (window.caches && caches.keys) {
+          jobs.push(
+            caches.keys().then(function (ks) {
+              return Promise.all(ks.map(function (k) { return caches.delete(k); }));
+            })
+          );
+        }
+      } catch (e) {}
+      var all = Promise.all(jobs.map(function (j) { return j.catch(function () {}); }));
+      var cap = new Promise(function (res) { setTimeout(res, 4000); });
+      return Promise.race([all, cap]);
+    };
+
+    // Raw dump straight from IndexedDB (works even when app.js is broken). Same file format as the in-app backup.
+    function rawBackup(setStatus) {
+      setStatus("正在读取本机数据…");
+      var names = ["decks", "questions", "reviews", "wrong_book", "meta", "review_log"];
+      var req = indexedDB.open("ebbinghaus-pwa");
+      var done = false;
+      setTimeout(function () { if (!done) setStatus("读取超时，数据没有被改动。请稍后重试。"); }, 15000);
+      req.onerror = function () { done = true; setStatus("无法读取本机数据库：" + msgOf(req.error)); };
+      req.onsuccess = function () {
+        var db = req.result;
+        var stores = {};
+        var pending = 0;
+        var tx;
+        try {
+          var have = [];
+          for (var i = 0; i < names.length; i++) if (db.objectStoreNames.contains(names[i])) have.push(names[i]);
+          tx = db.transaction(have, "readonly");
+          have.forEach(function (n) {
+            pending++;
+            var r = tx.objectStore(n).getAll();
+            r.onsuccess = function () {
+              stores[n] = r.result;
+              if (--pending === 0) finish();
+            };
+            r.onerror = function () { done = true; setStatus("读取失败：" + msgOf(r.error)); };
+          });
+          if (!have.length) finish();
+        } catch (e) { done = true; setStatus("读取失败：" + msgOf(e)); }
+        function finish() {
+          done = true;
+          var cursors = {};
+          try { cursors = JSON.parse(localStorage.getItem("ebbinghaus_cursors_v2") || "{}") || {}; } catch (e) {}
+          var settings;
+          try { settings = JSON.parse(localStorage.getItem("pair_settings_v1") || "null") || undefined; } catch (e) {}
+          var payload = { kind: "pair-progress-backup", exportedAt: Date.now(), version: 1, updatedAt: Date.now(), stores: stores, cursors: cursors, seqMeta: {}, settings: settings };
+          var json = JSON.stringify(payload);
+          var d = new Date();
+          var p2 = function (x) { return (x < 10 ? "0" : "") + x; };
+          var name = "Pair-进度备份-" + d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + "-" + p2(d.getHours()) + p2(d.getMinutes()) + ".json";
+          try { db.close(); } catch (e) {}
+          try {
+            if (navigator.canShare && typeof File === "function") {
+              var f = new File([json], name, { type: "application/json" });
+              if (navigator.canShare({ files: [f] })) {
+                navigator.share({ files: [f], title: name }).then(function () { setStatus("备份已导出。"); }, function () { setStatus("已取消导出（数据没有被改动）。"); });
+                return;
+              }
+            }
+          } catch (e) {}
+          var url = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+          var a = document.createElement("a");
+          a.href = url; a.download = name; a.style.display = "none";
+          document.body.appendChild(a); a.click();
+          setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 4000);
+          setStatus("备份已导出（" + (stores.questions ? stores.questions.length : 0) + " 题，" + (stores.reviews ? stores.reviews.length : 0) + " 条做题记录）。");
+        }
+      };
+    }
+
+    function hide() {
+      if (overlay && overlay.parentNode) overlay.parentNode.removeChild(overlay);
+      overlay = null;
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    // force=true: show even if something is already drawn (fatal error reported by app.js)
+    window.__pairRecovery = function (why, force) {
+      if (!force && appRendered()) return;
+      if (overlay) {
+        var m = overlay.querySelector("[data-msg]");
+        if (m && why) m.textContent = String(why);
+        return;
+      }
+      var wrap = document.createElement("div");
+      wrap.setAttribute("style", "position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:#fff;color:#000;overflow:auto;-webkit-overflow-scrolling:touch;padding:calc(24px + env(safe-area-inset-top,0px)) 20px 32px;font:16px/1.6 -apple-system,BlinkMacSystemFont,'PingFang SC',sans-serif");
+      var btn = "display:block;width:100%;margin:12px 0 0;padding:14px 12px;font-size:16px;color:#000;background:#fff;border:2px solid #000;border-radius:0;-webkit-appearance:none;font-family:inherit";
+      wrap.innerHTML =
+        '<h1 style="font-size:22px;margin:0 0 12px">页面没能正常打开</h1>' +
+        '<p style="margin:0 0 8px">你的做题记录都保存在这台设备上，没有被删除，下面的操作也不会删除它们。</p>' +
+        '<p style="margin:0 0 12px;color:#555;font-size:14px;word-break:break-all">原因：<span data-msg>' + esc(why || lastErr || "启动超时") + "</span></p>" +
+        '<button type="button" data-a="reload" style="' + btn + ';background:#000;color:#fff">重新加载</button>' +
+        '<button type="button" data-a="clear" style="' + btn + '">清除缓存并重新加载</button>' +
+        '<button type="button" data-a="backup" style="' + btn + '">导出进度备份</button>' +
+        '<p data-status style="margin:14px 0 0;color:#555;font-size:14px"></p>' +
+        '<p style="margin:14px 0 0;color:#555;font-size:13px">「清除缓存」只清除程序文件缓存，不会清除进度。如果反复出现，请先点「导出进度备份」保存一份。</p>';
+      document.body.appendChild(wrap);
+      overlay = wrap;
+      var status = wrap.querySelector("[data-status]");
+      function setStatus(t) { status.textContent = t; }
+      wrap.addEventListener("click", function (ev) {
+        var a = ev.target && ev.target.getAttribute && ev.target.getAttribute("data-a");
+        if (a === "reload") location.reload();
+        else if (a === "clear") {
+          setStatus("正在清除缓存…");
+          window.__pairClearCodeCaches().then(function () { location.reload(); });
+        } else if (a === "backup") rawBackup(setStatus);
+      });
+      // if the app does come up after all (slow device / network), get out of the way
+      timer = setInterval(function () { if (!force && appRendered()) hide(); }, 700);
+    };
+
+    function onFail(msg) {
+      lastErr = msg;
+      // give a normal startup 2.5s to finish rendering; only an app that is still blank gets the recovery screen
+      setTimeout(function () { if (!appRendered()) window.__pairRecovery(msg, false); }, 2500);
+    }
+    window.addEventListener("error", function (ev) {
+      if (ev && ev.target && ev.target !== window) return; // resource load errors are not script crashes
+      onFail(msgOf(ev && (ev.error || ev.message)));
+    });
+    window.addEventListener("unhandledrejection", function (ev) { onFail(msgOf(ev && ev.reason)); });
+
+    // watchdog: nothing drawn 8s after load = something is stuck (hung database, hung script, ...)
+    setTimeout(function () {
+      if (!appRendered()) window.__pairRecovery(lastErr || "启动超过 8 秒仍没有显示内容", false);
+    }, 8000);
+  })();
+  </script>
+  <script src="app.js?v=29" defer></script>
+</body>
+</html>

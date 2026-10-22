@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="robots" content="noindex, nofollow" />
+<meta name="referrer" content="no-referrer" />
+<title>Pair · 管理</title>
+<style>
+  *{box-sizing:border-box;border-radius:0}
+  body{margin:0;font:15px/1.5 -apple-system,BlinkMacSystemFont,"PingFang SC","Helvetica Neue",sans-serif;color:#000;background:#fff;padding:16px;max-width:860px;margin:0 auto}
+  h1{font-size:20px;margin:8px 0 16px;display:flex;justify-content:space-between;align-items:center}
+  input{font:inherit;padding:10px;border:1px solid #000;width:100%;margin:8px 0}
+  button{font:inherit;padding:10px 16px;border:1px solid #000;background:#000;color:#fff;cursor:pointer}
+  button.ghost{background:#fff;color:#000}
+  .muted{color:#666;font-size:13px}
+  .err{color:#000;font-weight:600;min-height:1.5em}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:0;border:1px solid #000;margin-bottom:20px}
+  .num{padding:12px;border:1px solid #000;margin:-1px 0 0 -1px}
+  .num b{display:block;font-size:26px;line-height:1.2}
+  .num span{font-size:12px;color:#444}
+  h2{font-size:15px;margin:22px 0 8px;border-bottom:1px solid #000;padding-bottom:4px}
+  svg{width:100%;height:auto;display:block}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{border-bottom:1px solid #ddd;padding:6px 4px;text-align:left;white-space:nowrap}
+  th{border-bottom:1px solid #000}
+  .wrap{overflow-x:auto}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .pub{border:1px solid #000;padding:10px;margin:-1px 0 0}
+  .pub .t{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center}
+  .tag{display:inline-block;border:1px solid #000;padding:0 6px;font-size:12px;margin-left:6px}
+  .tag.on{background:#000;color:#fff}
+  .btns{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .btns button{padding:6px 10px;font-size:13px}
+  .q{border-bottom:1px solid #ddd;padding:8px 0;font-size:14px}
+  .q .a{font-weight:600}
+  #pv{position:fixed;inset:0;background:#fff;overflow:auto;padding:16px;max-width:860px;margin:0 auto}
+</style>
+</head>
+<body>
+<div id="login" hidden>
+  <h1>Pair 管理</h1>
+  <p class="muted">仅管理员使用。</p>
+  <form id="f"><input id="key" type="password" autocomplete="current-password" placeholder="管理密码" /><button type="submit">进入</button></form>
+  <p class="err" id="err"></p>
+</div>
+<div id="dash" hidden>
+  <h1>Pair 使用情况 <span class="row"><button class="ghost" id="reload">刷新</button><button class="ghost" id="logout">退出</button></span></h1>
+  <div class="grid" id="nums"></div>
+  <h2>题库发布</h2>
+  <p class="muted">上传的题库先存为「草稿」，只有你在这里能看到；点「发布给所有人」后，其他人打开 Pair 时才会自动添加。</p>
+  <div class="row"><input id="up-name" placeholder="考试名称（默认用文件名）" style="flex:1;min-width:180px" /><label class="ghost" style="border:1px solid #000;padding:10px 16px;cursor:pointer;margin:8px 0">选择 xlsx<input id="up-file" type="file" accept=".xlsx,.xls" hidden /></label></div>
+  <p class="muted" id="up-msg"></p>
+  <div id="pubs"></div>
+  <h2>近 30 天每日活跃设备</h2>
+  <div id="chart"></div>
+  <h2>平台</h2>
+  <div id="plat" class="muted"></div>
+  <h2>设备（按最近使用）</h2>
+  <div class="wrap"><table><thead><tr><th>设备</th><th>平台</th><th>首次</th><th>最近</th><th>打开</th><th>已做</th><th>版本</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <p class="muted">统计按设备/浏览器计算，不是按人；同一人换手机或换浏览器会算作新设备。不记录 IP 或个人信息。</p>
+</div>
+<div id="pv" hidden></div>
+<script>
+(function () {
+  var LS = "pair_admin_key";
+  var $ = function (id) { return document.getElementById(id); };
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function fmt(ms) {
+    if (!ms) return "-";
+    var d = new Date(ms + 8 * 3600e3).toISOString();
+    return d.slice(5, 10) + " " + d.slice(11, 16);
+  }
+  function getKey() { try { return localStorage.getItem(LS) || ""; } catch (_) { return ""; } }
+  function showLogin(msg) { $("dash").hidden = true; $("login").hidden = false; $("err").textContent = msg || ""; }
+  async function load(key, fromLogin) {
+    var r;
+    try {
+      r = await fetch("/api/admin/stats", { headers: { "X-Admin-Key": key }, cache: "no-store" });
+    } catch (e) { showLogin("网络错误，请稍后再试"); return; }
+    if (r.status === 401) { try { localStorage.removeItem(LS); } catch (_) {} showLogin(fromLogin ? "密码不对" : ""); return; }
+    if (!r.ok) { showLogin("服务暂不可用（" + r.status + "）"); return; }
+    var s = await r.json();
+    try { localStorage.setItem(LS, key); } catch (_) {}
+    render(s);
+    loadPubs();
+  }
+
+  /* ---------- 题库发布 ---------- */
+  var ST = { draft: "草稿", published: "已发布", "published-pending": "已发布（有未发布的新版本）", withdrawn: "已撤回" };
+  function api(path, method, body) {
+    return fetch(path, { method: method || "GET", headers: { "X-Admin-Key": getKey(), "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined, cache: "no-store" })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ("HTTP " + r.status)); return j; }); });
+  }
+  function loadScript(src) { return new Promise(function (ok, no) { var s = document.createElement("script"); s.src = src; s.onload = ok; s.onerror = function () { no(new Error("加载失败 " + src)); }; document.head.appendChild(s); }); }
+  var parserP = null;
+  function parser() { return parserP || (parserP = loadScript("/vendor/xlsx.full.min.js").then(function () { return loadScript("/vendor/pair-parse.js"); })); }
+  async function parseFile(f) {
+    await parser();
+    var qs = window.PairParse.parseXlsx(new Uint8Array(await f.arrayBuffer()), f.name);
+    return qs.filter(function (q) { return q && q.stem && q.answer != null && String(q.answer).trim(); });
+  }
+  async function loadPubs() {
+    try {
+      var r = await api("/api/admin/decks");
+      $("pubs").innerHTML = (r.decks || []).map(function (d) {
+        var pub = d.status === "published" || d.status === "published-pending";
+        var types = Object.keys(d.types || {}).map(function (k) { return k + " " + d.types[k]; }).join(" · ");
+        return '<div class="pub" data-k="' + esc(d.key) + '"><div class="t"><b>' + esc(d.name) + '<span class="tag' + (pub ? " on" : "") + '">' + (ST[d.status] || d.status) + '</span></b><span class="muted">' + d.count + " 题 · 第 " + d.version + " 版" + (d.publishedVersion ? "（线上第 " + d.publishedVersion + " 版）" : "") + "</span></div>" +
+          '<div class="muted">' + esc(types) + " · 更新 " + fmt(d.updatedAt) + "</div>" +
+          '<div class="btns"><button class="ghost" data-a="view">预览</button><button class="ghost" data-a="rename">重命名</button><label class="ghost" style="border:1px solid #000;padding:6px 10px;font-size:13px;cursor:pointer">上传新版本<input type="file" accept=".xlsx,.xls" data-a="ver" hidden /></label>' +
+          (d.status !== "published" ? '<button data-a="publish">发布给所有人</button>' : "") +
+          (pub ? '<button class="ghost" data-a="withdraw">撤回发布</button>' : "") +
+          '<button class="ghost" data-a="del">删除</button></div></div>';
+      }).join("") || '<p class="muted">还没有上传的题库</p>';
+    } catch (e) { $("pubs").innerHTML = '<p class="err">' + esc(e.message) + "</p>"; }
+  }
+  $("up-file").addEventListener("change", async function () {
+    var f = this.files[0]; this.value = ""; if (!f) return;
+    var m = $("up-msg"); m.textContent = "解析中…";
+    try {
+      var qs = await parseFile(f);
+      if (!qs.length) throw new Error("没有解析到题目");
+      var name = $("up-name").value.trim() || f.name.replace(/\.(xlsx|xls)$/i, "");
+      m.textContent = "解析到 " + qs.length + " 题，保存草稿中…";
+      await api("/api/admin/decks", "POST", { name: name, questions: qs });
+      m.textContent = "已保存为草稿：" + name + "（" + qs.length + " 题），其他人看不到"; $("up-name").value = "";
+      loadPubs();
+    } catch (e) { m.textContent = "失败：" + e.message; }
+  });
+  $("pubs").addEventListener("change", async function (ev) {
+    var inp = ev.target; if (inp.dataset.a !== "ver") return;
+    var k = inp.closest(".pub").dataset.k, f = inp.files[0]; inp.value = ""; if (!f) return;
+    try { var qs = await parseFile(f); if (!confirm("新版本 " + qs.length + " 题，保存为未发布的新版本？")) return; await api("/api/admin/decks/" + k, "PUT", { questions: qs }); loadPubs(); } catch (e) { alert("失败：" + e.message); }
+  });
+  $("pubs").addEventListener("click", async function (ev) {
+    var b = ev.target.closest("button[data-a]"); if (!b) return;
+    var k = b.closest(".pub").dataset.k, a = b.dataset.a;
+    try {
+      if (a === "view") return preview(k);
+      if (a === "rename") { var n = prompt("新名称"); if (!n) return; await api("/api/admin/decks/" + k, "PATCH", { name: n }); }
+      if (a === "publish") { if (!confirm("发布后，所有人打开 Pair 时会自动添加这个考试，确定吗？")) return; await api("/api/admin/decks/" + k, "PATCH", { action: "publish" }); }
+      if (a === "withdraw") { if (!confirm("撤回后不再给新用户添加；已经添加的人仍会保留。确定吗？")) return; await api("/api/admin/decks/" + k, "PATCH", { action: "withdraw" }); }
+      if (a === "del") { if (!confirm("删除这个题库（草稿和线上版本）？已经添加的人仍会保留。")) return; await api("/api/admin/decks/" + k, "DELETE"); }
+      loadPubs();
+    } catch (e) { alert("失败：" + e.message); }
+  });
+  async function preview(k) {
+    var pv = $("pv"); pv.hidden = false; pv.innerHTML = '<p class="muted">加载中…</p>';
+    var r = await api("/api/admin/decks/" + k);
+    var qs = r.questions || [];
+    var types = Object.keys(r.deck.types || {}).map(function (t) { return t + " " + r.deck.types[t]; }).join(" · ");
+    pv.innerHTML = '<h1>' + esc(r.deck.name) + ' <button class="ghost" id="pv-x">关闭</button></h1><p class="muted">共 ' + qs.length + " 题 · " + esc(types) + '</p><input id="pv-q" placeholder="搜索题干 / 选项" /><div id="pv-list"></div>';
+    function draw() {
+      var q = $("pv-q").value.trim(), n = 0, html = "";
+      for (var i = 0; i < qs.length && n < 300; i++) {
+        var x = qs[i], hay = x.stem + " " + (x.options || []).join(" ");
+        if (q && hay.indexOf(q) < 0) continue; n++;
+        html += '<div class="q"><div>' + (i + 1) + ". " + esc(x.stem) + "</div>" + (x.options ? '<div class="muted">' + x.options.map(esc).join("<br>") + "</div>" : "") + '<div class="a">答案：' + esc(x.answer) + "</div></div>";
+      }
+      $("pv-list").innerHTML = html + (n >= 300 ? '<p class="muted">只显示前 300 条，请用搜索缩小范围</p>' : "");
+    }
+    $("pv-q").addEventListener("input", draw); $("pv-x").onclick = function () { pv.hidden = true; pv.innerHTML = ""; }; draw();
+  }
+  function render(s) {
+    $("login").hidden = true; $("dash").hidden = false;
+    var n = [["总设备", s.totalDevices], ["今日活跃", s.activeToday], ["7 天活跃", s.active7d], ["30 天活跃", s.active30d], ["添加到主屏幕", s.standalone], ["已开云同步", s.syncBound]];
+    $("nums").innerHTML = n.map(function (x) { return '<div class="num"><b>' + x[1] + "</b><span>" + x[0] + "</span></div>"; }).join("");
+    var d = s.daily || [], max = Math.max(1, Math.max.apply(null, d.map(function (x) { return x.active; })));
+    var W = 600, H = 140, bw = W / Math.max(1, d.length);
+    var bars = d.map(function (x, i) {
+      var h = Math.round((x.active / max) * (H - 20));
+      return '<rect x="' + (i * bw + 1) + '" y="' + (H - 14 - h) + '" width="' + (bw - 2) + '" height="' + h + '" fill="#000"><title>' + x.date + "：" + x.active + "</title></rect>";
+    }).join("");
+    var lab = d.length ? '<text x="0" y="' + H + '" font-size="10">' + d[0].date.slice(5) + '</text><text x="' + W + '" y="' + H + '" font-size="10" text-anchor="end">' + d[d.length - 1].date.slice(5) + '</text><text x="0" y="10" font-size="10">最高 ' + max + "</text>" : "";
+    $("chart").innerHTML = '<svg viewBox="0 0 ' + W + " " + H + '" role="img">' + bars + lab + "</svg>";
+    var p = s.platforms || {};
+    $("plat").textContent = Object.keys(p).map(function (k) { return k + " " + p[k]; }).join(" · ") || "暂无";
+    $("rows").innerHTML = (s.devices || []).map(function (x) {
+      return "<tr><td>" + esc(x.id) + "</td><td>" + esc(x.platform) + (x.standalone ? " ·主屏" : "") + "</td><td>" + fmt(x.firstSeen) + "</td><td>" + fmt(x.lastSeen) + "</td><td>" + x.opens + "</td><td>" + x.answered + "</td><td>" + esc(x.build) + "</td></tr>";
+    }).join("") || '<tr><td colspan="7" class="muted">暂无数据</td></tr>';
+  }
+  $("f").addEventListener("submit", function (e) { e.preventDefault(); var k = $("key").value.trim(); if (k) load(k, true); });
+  $("logout").addEventListener("click", function () { try { localStorage.removeItem(LS); } catch (_) {} $("key").value = ""; showLogin(""); });
+  $("reload").addEventListener("click", function () { load(getKey(), false); });
+  var k = getKey();
+  if (k) load(k, false); else showLogin("");
+})();
+</script>
+</body>
+</html>

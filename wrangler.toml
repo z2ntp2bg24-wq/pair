@@ -1,0 +1,7 @@
+name = "meihua-tiku"
+compatibility_date = "2024-09-23"
+pages_build_output_dir = "."
+
+[[kv_namespaces]]
+binding = "PAIR_SYNC"
+id = "03825ed67f3545a39d944b58154a209c"
